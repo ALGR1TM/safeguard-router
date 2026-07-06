@@ -1,4 +1,4 @@
-const CACHE = 'safeguard-router-v3';
+const CACHE = 'safeguard-router-v4';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'

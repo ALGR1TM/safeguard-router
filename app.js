@@ -2,7 +2,8 @@ import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
 
-let pendingStops = null;  // stops parsed but waiting on a home address
+const APP_VERSION = 'v4';  // keep in sync with sw.js CACHE
+let pendingStops = null;   // stops parsed but waiting on a home address
 const $ = (id) => document.getElementById(id);
 const status = (msg, err = false) => { const s = $('status'); s.textContent = msg; s.className = 'status' + (err ? ' err' : ''); };
 
@@ -256,6 +257,7 @@ async function handleShared(){
   } catch(e){}
 }
 
+const vEl = $('version'); if (vEl) vEl.textContent = APP_VERSION;
 loadSettings();
 if (new URLSearchParams(location.search).has('shared')) handleShared();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
