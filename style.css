@@ -45,4 +45,5 @@ th{color:var(--muted);font-weight:600}
 td.addr{white-space:normal;min-width:180px}
 .vacant{color:var(--warn)}
 .badge{font-size:11px;background:var(--warn);color:#3a2e0a;border-radius:6px;padding:1px 6px;font-weight:700}
+.badge.approx{background:var(--accent);color:#04263a}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}

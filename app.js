@@ -69,16 +69,43 @@ const geoCache = JSON.parse(localStorage.getItem('geo') || '{}');
 const saveGeo = () => localStorage.setItem('geo', JSON.stringify(geoCache));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function geocode(addr){
-  const key = addr.toLowerCase();
-  if (geoCache[key]) return geoCache[key];
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(addr);
+// Clean up the messy addresses these sheets contain so the geocoder can read them.
+function normalizeAddr(a){
+  let s = a.replace(/,?\s*USA\s*$/i, '');
+  s = s.replace(/\bF[Tt]\.?\s+WORTH\b/ig, 'Fort Worth');   // FT WORTH -> Fort Worth
+  s = s.replace(/^(\d+)([A-Za-z])\b/, '$1 $2');            // 453S / 8204S -> 453 S / 8204 S
+  if (!/\bTX\b/i.test(s)) s = s.replace(/,\s*(\d{5})(-\d{4})?\s*$/, ', TX $1'); // add state
+  return s.replace(/\s+/g, ' ').trim();
+}
+// The city token (segment before the ZIP), for a ZIP/city-level fallback.
+function cityOf(a){
+  const parts = a.replace(/,?\s*USA\s*$/i,'').split(',').map(x=>x.trim()).filter(Boolean)
+    .filter(x => !/^\d{5}(-\d{4})?$/.test(x) && !/^TX(\s+\d{5})?$/i.test(x));
+  return parts.length > 1 ? parts[parts.length-1] : '';
+}
+
+async function geoQuery(q){
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q);
   const res = await fetch(url, { headers: { 'Accept':'application/json' } });
   const j = await res.json();
-  if (!j.length) return null;
-  const pt = { lat: +j[0].lat, lon: +j[0].lon };
-  geoCache[key] = pt; saveGeo();
-  return pt;
+  return j.length ? { lat:+j[0].lat, lon:+j[0].lon } : null;
+}
+
+// Best-effort locate: precise address first, then ZIP/city center. Returns {lat,lon,approx}.
+async function geocode(addr, zip){
+  const key = addr.toLowerCase();
+  if (geoCache[key]) return geoCache[key];
+  let pt = null;
+  try { pt = await geoQuery(normalizeAddr(addr)); } catch(e){}
+  let approx = false;
+  if (!pt){
+    await sleep(1100);
+    const fq = [cityOf(addr), 'TX', zip].filter(Boolean).join(' ');
+    try { pt = await geoQuery(fq); approx = !!pt; } catch(e){}
+  }
+  const val = pt ? { ...pt, approx } : null;
+  if (val){ geoCache[key] = val; saveGeo(); }
+  return val;
 }
 
 // ---------- optimization ----------
@@ -120,21 +147,26 @@ function optimize(home, stops){
   return order.map(i => stops[i]);
 }
 
-// ---------- google maps links (split if long) ----------
+// ---------- google maps links (chunked into legs; Google caps ~10 points/link) ----------
 function mapsLinks(homeAddr, ordered){
   const enc = s => encodeURIComponent(s);
   const stops = ordered.map(s => s.address);
-  const pts = [homeAddr, ...stops, homeAddr];
   const mk = arr => 'https://www.google.com/maps/dir/' + arr.map(enc).join('/');
-  if (pts.length <= 11) return [{ label:'Open full route in Google Maps', url: mk(pts) }];
-  // split at the far midpoint so each half is short enough
-  const mid = Math.ceil(stops.length/2);
-  const part1 = [homeAddr, ...stops.slice(0, mid)];
-  const part2 = [stops[mid-1], ...stops.slice(mid), homeAddr];
-  return [
-    { label:'Part 1 · Home → stop ' + mid, url: mk(part1) },
-    { label:'Part 2 · stop ' + mid + ' → Home', url: mk(part2), second:true },
-  ];
+  if (stops.length <= 9) return [{ label:'Open full route in Google Maps', url: mk([homeAddr, ...stops, homeAddr]) }];
+  const PER = 8;                     // new stops per leg (+1 handoff/home start ≤ 9 points)
+  const links = []; let start = homeAddr;
+  for (let i = 0; i < stops.length; i += PER){
+    const chunk = stops.slice(i, i + PER);
+    const last = i + PER >= stops.length;
+    const pts = [start, ...chunk]; if (last) pts.push(homeAddr);
+    const n = links.length + 1;
+    links.push({
+      label: `Leg ${n} · stops ${i+1}–${i+chunk.length}${last ? ' → Home' : ''}`,
+      url: mk(pts), second: n % 2 === 0,
+    });
+    start = chunk[chunk.length-1];   // next leg resumes from this leg's final stop
+  }
+  return links;
 }
 
 // ---------- render ----------
@@ -154,7 +186,7 @@ function render(homeAddr, ordered, roadMiles){
 
   const rows = ordered.map((s,i)=>`<tr>
     <td>${i+1}</td><td>${s.stop}</td>
-    <td class="addr ${s.vacant?'vacant':''}">${s.address}${s.vacant?' <span class="badge">vacant</span>':''}</td>
+    <td class="addr ${s.vacant?'vacant':''}">${s.address}${s.vacant?' <span class="badge">vacant</span>':''}${s.approx?' <span class="badge approx">approx pin</span>':''}</td>
     <td>${s.zip}</td></tr>`).join('');
   $('stopsTable').innerHTML =
     `<tr><th>#</th><th>Sheet</th><th>Address</th><th>ZIP</th></tr>` + rows;
@@ -170,26 +202,31 @@ async function run(stops){
   const home = await geocode(homeAddr);
   if (!home){ status('Could not locate your home address — check it in Settings.', true); return; }
 
-  const good = [];
+  const located = [], noPin = [];
+  let approxCount = 0;
   for (let i = 0; i < stops.length; i++){
-    try {
-      const pt = await geocode(stops[i].address);
-      if (pt){ stops[i].pt = pt; good.push(stops[i]); }
-    } catch(e){ /* skip on error */ }
-    status(`Geocoding… (${i+1}/${stops.length})`);
-    if (!geoCache[stops[i].address.toLowerCase()]) await sleep(1100); // respect rate limit on misses
+    const cached = geoCache[stops[i].address.toLowerCase()];
+    const pt = await geocode(stops[i].address, stops[i].zip);
+    if (pt){ stops[i].pt = pt; stops[i].approx = !!pt.approx; if (pt.approx) approxCount++; located.push(stops[i]); }
+    else noPin.push(stops[i]);           // couldn't place at all — keep it, append later
+    status(`Locating stops… (${i+1}/${stops.length})`);
+    if (!cached) await sleep(1100);      // respect rate limit only on fresh lookups
   }
-  if (!good.length){ status('Could not geocode any address (offline?). Connect and retry.', true); return; }
 
-  const ordered = optimize(home, good);
-  // road-distance estimate = straight-line * 1.3
-  let miles = haversine(home, ordered[0].pt);
-  for (let i = 0; i < ordered.length-1; i++) miles += haversine(ordered[i].pt, ordered[i+1].pt);
-  miles += haversine(ordered[ordered.length-1].pt, home);
+  // Order the ones we could place; append any unplaceable at the end so they're never lost.
+  const ordered = located.length ? optimize(home, located) : [];
+  for (const s of noPin){ s.pt = null; s.approx = true; ordered.push(s); }
+
+  // road-distance estimate = straight-line * 1.3 (skip legs to unplaced stops)
+  let miles = 0, prev = home;
+  for (const s of ordered){ if (s.pt){ miles += haversine(prev, s.pt); prev = s.pt; } }
+  miles += haversine(prev, home);
   miles *= 1.3;
 
-  const missed = stops.length - good.length;
-  status(missed ? `Routed ${good.length} stops. ${missed} address(es) couldn't be located — check them manually.` : `Routed all ${good.length} stops. ✅`);
+  const notes = [];
+  if (approxCount) notes.push(`${approxCount} placed at ZIP level (nav link still uses the exact address)`);
+  if (noPin.length) notes.push(`${noPin.length} couldn't be located at all — check those manually`);
+  status(`Routed all ${stops.length} stops.` + (notes.length ? ' ' + notes.join('; ') + '.' : ' ✅'));
   render(homeAddr, ordered, miles);
   $('resultCard').scrollIntoView({ behavior:'smooth' });
 }
