@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0f172a" />
+<title>Safeguard Router</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <h1>🗺️ Safeguard Router</h1>
+  <button id="settingsBtn" class="ghost" title="Settings">⚙️</button>
+</header>
+
+<main>
+  <section id="settings" class="card hidden">
+    <h2>Settings</h2>
+    <label>Home address (start &amp; end of every route)
+      <input id="homeAddr" type="text" placeholder="2312 Fountain Gate Dr, Little Elm, TX 75068" />
+    </label>
+    <div class="row">
+      <label>Gas price ($/gal)
+        <input id="gasPrice" type="number" step="0.01" value="3.20" />
+      </label>
+      <label>MPG
+        <input id="mpg" type="number" step="1" value="24" />
+      </label>
+    </div>
+    <p class="hint">Saved only on this device. Nothing is uploaded.</p>
+    <button id="saveSettings">Save</button>
+  </section>
+
+  <section class="card">
+    <h2>1 · Load today's stops</h2>
+    <div class="drop" id="drop">
+      <input id="file" type="file" accept="application/pdf,image/*" hidden />
+      <button id="pickBtn" class="big">📄 Upload PDF</button>
+      <p class="hint">…or paste the list below</p>
+      <textarea id="pasteBox" rows="4" placeholder="1  355034458  * 3901 BROOKGATE CT, ARLINGTON, 76016&#10;2  354923574  5410 WINGED FOOT DR, ARLINGTON, 76017"></textarea>
+      <button id="parsePaste" class="ghost">Parse pasted text</button>
+    </div>
+    <p id="status" class="status"></p>
+  </section>
+
+  <section id="resultCard" class="card hidden">
+    <h2>2 · Your optimized route</h2>
+    <div id="summary" class="summary"></div>
+    <div class="links" id="mapsLinks"></div>
+    <div class="toll">⚠️ In Google Maps, open <b>Route options → Avoid tolls</b>. Watch the commute for
+      Sam Rayburn Tollway (121), Dallas North Tollway, and PGBT.</div>
+    <div class="tablewrap"><table id="stopsTable"></table></div>
+  </section>
+</main>
+
+<footer>Runs entirely on your phone · addresses geocoded via OpenStreetMap</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs" type="module"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
