@@ -2,6 +2,7 @@ import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
 
+let pendingStops = null;  // stops parsed but waiting on a home address
 const $ = (id) => document.getElementById(id);
 const status = (msg, err = false) => { const s = $('status'); s.textContent = msg; s.className = 'status' + (err ? ' err' : ''); };
 
@@ -18,7 +19,9 @@ function loadSettings(){ $('homeAddr').value = store.home; $('gasPrice').value =
 $('settingsBtn').onclick = () => $('settings').classList.toggle('hidden');
 $('saveSettings').onclick = () => {
   store.home = $('homeAddr').value.trim(); store.gas = $('gasPrice').value; store.mpg = $('mpg').value;
-  $('settings').classList.add('hidden'); status('Settings saved.');
+  $('settings').classList.add('hidden');
+  if (store.home && pendingStops){ const s = pendingStops; pendingStops = null; run(s); }  // resume without re-upload
+  else status('Settings saved.');
 };
 
 // ---------- parsing ----------
@@ -161,7 +164,7 @@ function render(homeAddr, ordered, roadMiles){
 async function run(stops){
   if (!stops.length){ status('No stops found in that file. Try pasting the list instead.', true); return; }
   const homeAddr = store.home.trim();
-  if (!homeAddr){ status('Set your home address in ⚙️ Settings first.', true); $('settings').classList.remove('hidden'); return; }
+  if (!homeAddr){ pendingStops = stops; status(`Got ${stops.length} stops — now type your home address above and tap Save.`, true); $('settings').classList.remove('hidden'); $('homeAddr').focus(); $('settings').scrollIntoView({behavior:'smooth'}); return; }
 
   status(`Found ${stops.length} stops. Geocoding… (0/${stops.length})`);
   const home = await geocode(homeAddr);
