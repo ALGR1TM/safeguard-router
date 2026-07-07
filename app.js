@@ -2,7 +2,7 @@ import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
 
-const APP_VERSION = 'v4';  // keep in sync with sw.js CACHE
+const APP_VERSION = 'v5';  // keep in sync with sw.js CACHE
 let pendingStops = null;   // stops parsed but waiting on a home address
 const $ = (id) => document.getElementById(id);
 const status = (msg, err = false) => { const s = $('status'); s.textContent = msg; s.className = 'status' + (err ? ' err' : ''); };
@@ -85,26 +85,37 @@ function cityOf(a){
   return parts.length > 1 ? parts[parts.length-1] : '';
 }
 
-async function geoQuery(q){
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q);
+async function geoQuery(q, viewbox){
+  let url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q);
+  if (viewbox) url += '&viewbox=' + viewbox + '&bounded=0';   // bias toward the area, don't hard-exclude
   const res = await fetch(url, { headers: { 'Accept':'application/json' } });
   const j = await res.json();
   return j.length ? { lat:+j[0].lat, lon:+j[0].lon } : null;
 }
 
-// Best-effort locate: precise address first, then ZIP/city center. Returns {lat,lon,approx}.
-async function geocode(addr, zip){
-  const key = addr.toLowerCase();
+// Reliable anchor for a ZIP: the ZIP centroid. Cached separately and reused across days.
+async function zipCentroid(zip){
+  if (!zip) return null;
+  const key = 'zip:' + zip;
   if (geoCache[key]) return geoCache[key];
   let pt = null;
-  try { pt = await geoQuery(normalizeAddr(addr)); } catch(e){}
+  try { pt = await geoQuery(zip + ', TX'); } catch(e){}
+  if (pt){ geoCache[key] = pt; saveGeo(); }
+  return pt;
+}
+
+// Locate one stop, ANCHORED to its ZIP so a stray match in another city can't blow up the route.
+// Returns {lat,lon,approx}: precise only if it sits within ~20 mi of the ZIP center, else the ZIP center.
+async function geocode(addr, zip, anchor){
+  const key = addr.toLowerCase();
+  if (geoCache[key]) return geoCache[key];
+  const box = anchor ? [anchor.lon-0.4, anchor.lat+0.4, anchor.lon+0.4, anchor.lat-0.4].join(',') : null;
+  let pt = null;
+  try { pt = await geoQuery(normalizeAddr(addr), box); } catch(e){}
   let approx = false;
-  if (!pt){
-    await sleep(1100);
-    const fq = [cityOf(addr), 'TX', zip].filter(Boolean).join(' ');
-    try { pt = await geoQuery(fq); approx = !!pt; } catch(e){}
-  }
-  const val = pt ? { ...pt, approx } : null;
+  if (pt && anchor && haversine(pt, anchor) > 20){ pt = null; }   // reject out-of-area match
+  if (!pt && anchor){ pt = { ...anchor }; approx = true; }        // snap to ZIP center
+  const val = pt ? { lat: pt.lat, lon: pt.lon, approx } : null;
   if (val){ geoCache[key] = val; saveGeo(); }
   return val;
 }
@@ -170,27 +181,57 @@ function mapsLinks(homeAddr, ordered){
   return links;
 }
 
+// ---------- done-state store (on-device DB, keyed by Order ID so it survives reloads) ----------
+const doneDB = JSON.parse(localStorage.getItem('done') || '{}');
+const saveDone = () => localStorage.setItem('done', JSON.stringify(doneDB));
+const isDone = (id) => !!(doneDB[id] && doneDB[id].done);
+function setDone(id, done){
+  if (done) doneDB[id] = { done: true, ts: new Date().toISOString() };
+  else delete doneDB[id];
+  saveDone();
+}
+
+let currentOrdered = [];   // for the progress counter
+function updateProgress(){
+  const total = currentOrdered.length;
+  const done = currentOrdered.filter(s => isDone(s.id)).length;
+  const el = $('progress');
+  if (el) el.innerHTML = `<span class="pill"><b>${done}/${total}</b> done</span>`;
+}
+
 // ---------- render ----------
 function render(homeAddr, ordered, roadMiles){
   $('resultCard').classList.remove('hidden');
+  currentOrdered = ordered;
   const gals = roadMiles / store.mpg, cost = gals * store.gas;
   const vac = ordered.filter(s=>s.vacant).length;
   $('summary').innerHTML =
     `<span class="pill"><b>${ordered.length}</b> stops</span>` +
     `<span class="pill"><b>${roadMiles.toFixed(1)}</b> mi</span>` +
     `<span class="pill">~<b>${gals.toFixed(1)}</b> gal · $${cost.toFixed(2)}</span>` +
-    (vac ? `<span class="pill">${vac} vacant</span>` : '');
+    (vac ? `<span class="pill">${vac} vacant</span>` : '') +
+    `<span id="progress"></span>`;
 
   const links = mapsLinks(homeAddr, ordered);
   $('mapsLinks').innerHTML = links.map(l =>
     `<a class="${l.second?'second':''}" href="${l.url}" target="_blank" rel="noopener">${l.label}</a>`).join('');
 
-  const rows = ordered.map((s,i)=>`<tr>
+  const rows = ordered.map((s,i)=>`<tr data-id="${s.id}" class="${isDone(s.id)?'done':''}">
+    <td><input type="checkbox" class="chk" data-id="${s.id}" ${isDone(s.id)?'checked':''} aria-label="Mark stop done"></td>
     <td>${i+1}</td><td>${s.stop}</td>
     <td class="addr ${s.vacant?'vacant':''}">${s.address}${s.vacant?' <span class="badge">vacant</span>':''}${s.approx?' <span class="badge approx">approx pin</span>':''}</td>
     <td>${s.zip}</td></tr>`).join('');
   $('stopsTable').innerHTML =
-    `<tr><th>#</th><th>Sheet</th><th>Address</th><th>ZIP</th></tr>` + rows;
+    `<tr><th>✓</th><th>#</th><th>Sheet</th><th>Address</th><th>ZIP</th></tr>` + rows;
+
+  $('stopsTable').querySelectorAll('.chk').forEach(cb => {
+    cb.onchange = () => {
+      setDone(cb.dataset.id, cb.checked);
+      cb.closest('tr').classList.toggle('done', cb.checked);
+      updateProgress();
+    };
+  });
+  updateProgress();
 }
 
 // ---------- pipeline ----------
@@ -199,15 +240,26 @@ async function run(stops){
   const homeAddr = store.home.trim();
   if (!homeAddr){ pendingStops = stops; status(`Got ${stops.length} stops — now type your home address above and tap Save.`, true); $('settings').classList.remove('hidden'); $('homeAddr').focus(); $('settings').scrollIntoView({behavior:'smooth'}); return; }
 
-  status(`Found ${stops.length} stops. Geocoding… (0/${stops.length})`);
+  status('Locating your home…');
   const home = await geocode(homeAddr);
   if (!home){ status('Could not locate your home address — check it in Settings.', true); return; }
 
+  // 1) Anchor each unique ZIP first — reliable, few requests, cached across days.
+  const zips = [...new Set(stops.map(s => s.zip).filter(Boolean))];
+  const anchors = {};
+  for (let i = 0; i < zips.length; i++){
+    const cached = geoCache['zip:' + zips[i]];
+    anchors[zips[i]] = await zipCentroid(zips[i]);
+    status(`Mapping ZIP areas… (${i+1}/${zips.length})`);
+    if (!cached) await sleep(1100);
+  }
+
+  // 2) Locate each stop, anchored to its ZIP so a stray match can't blow up the route.
   const located = [], noPin = [];
   let approxCount = 0;
   for (let i = 0; i < stops.length; i++){
     const cached = geoCache[stops[i].address.toLowerCase()];
-    const pt = await geocode(stops[i].address, stops[i].zip);
+    const pt = await geocode(stops[i].address, stops[i].zip, anchors[stops[i].zip]);
     if (pt){ stops[i].pt = pt; stops[i].approx = !!pt.approx; if (pt.approx) approxCount++; located.push(stops[i]); }
     else noPin.push(stops[i]);           // couldn't place at all — keep it, append later
     status(`Locating stops… (${i+1}/${stops.length})`);
